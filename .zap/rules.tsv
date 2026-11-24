@@ -1,0 +1,10 @@
+# Règles OWASP ZAP du projet (une règle par ligne, champs séparés par une tabulation).
+# Format : identifiant<TAB>IGNORE|WARN|FAIL<TAB>nom de la règle
+# Sans ligne, toutes les alertes sont des avertissements (WARN).
+# Passer une règle à FAIL fait échouer le scan si elle est détectée.
+# Exemples :
+# 10038	FAIL	Content Security Policy (CSP) Header Not Set
+# 10020	FAIL	Anti-clickjacking Header
+40012	FAIL	Cross Site Scripting (Reflected)
+40014	FAIL	Cross Site Scripting (Persistent)
+40018	FAIL	SQL Injection

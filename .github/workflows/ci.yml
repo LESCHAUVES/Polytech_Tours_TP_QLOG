@@ -121,3 +121,142 @@ jobs:
           name: cypress-screenshots
           path: frontend/cypress/screenshots
           if-no-files-found: ignore
+
+  # ══════════════════════════════════════════════════════════════════════
+  # Tests de sécurité (SP61, SP63, SP60 de la matrice de traçabilité)
+  # Ces jobs ont continue-on-error : un défaut trouvé est signalé en rouge
+  # sur le job, sans bloquer le reste de la pipeline. Les rapports sont
+  # téléchargeables dans les artefacts de l'exécution.
+  # Pour en faire une vraie porte de qualité, retirer continue-on-error.
+  # ══════════════════════════════════════════════════════════════════════
+
+  # ── Recherche de secrets dans tout l'historique Git (gitleaks) ─────────
+  secrets-gitleaks:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tout l'historique, pas seulement le dernier commit
+      - name: Installer gitleaks
+        run: |
+          curl -sSL -o gitleaks.tgz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar xzf gitleaks.tgz gitleaks
+      - name: Scan gitleaks (historique complet)
+        run: |
+          ./gitleaks git . --config .gitleaks.toml --redact --verbose \
+            --report-format json --report-path gitleaks-report.json
+      - name: Rapport gitleaks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          if-no-files-found: ignore
+
+  # ── Vulnérabilités connues des dépendances du frontend (npm audit) ─────
+  npm-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Rapport complet (toutes les dépendances)
+        run: npm audit --json > npm-audit-report.json || true
+      - name: npm audit (dépendances livrées, niveau high et plus)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Rapport npm audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: frontend/npm-audit-report.json
+          if-no-files-found: ignore
+
+  # ── Scan dynamique OWASP ZAP (frontend + API authentifiée) ─────────────
+  zap:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Installer et démarrer le backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python seed.py
+          nohup uvicorn app.main:app --port 8000 > ../backend.log 2>&1 &
+
+      - name: Installer et démarrer le frontend
+        working-directory: frontend
+        env:
+          CYPRESS_INSTALL_BINARY: 0
+        run: |
+          npm ci
+          # --host 127.0.0.1 : sinon Vite n'écoute que sur ::1 (IPv6).
+          nohup npm run dev -- --host 127.0.0.1 > ../frontend.log 2>&1 &
+
+      - name: Attendre que backend et frontend répondent
+        run: npx --yes wait-on --timeout 60000 http-get://127.0.0.1:5173 http-get://127.0.0.1:8000/api/v1/health
+
+      - name: Préparer le dossier des rapports ZAP
+        run: |
+          mkdir -p zap-reports
+          cp .zap/rules.tsv zap-reports/rules.tsv
+          chmod -R 777 zap-reports   # le conteneur ZAP écrit sous un autre utilisateur
+
+      - name: Jeton administrateur pour le scan de l'API
+        run: |
+          TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@padel.com","password":"Admin@2025!"}' \
+            | python -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+          echo "::add-mask::$TOKEN"
+          echo "ZAP_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: ZAP baseline (frontend, scan passif)
+        run: |
+          docker run --rm --network=host -v "$PWD/zap-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t http://127.0.0.1:5173 -c rules.tsv \
+            -r zap-frontend.html -J zap-frontend.json -I
+
+      - name: ZAP API scan (backend, scan actif authentifié)
+        run: |
+          docker run --rm --network=host -v "$PWD/zap-reports:/zap/wrk:rw" \
+            -e ZAP_AUTH_HEADER=Authorization \
+            -e ZAP_AUTH_HEADER_VALUE="Bearer $ZAP_TOKEN" \
+            ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
+            -t http://127.0.0.1:8000/openapi.json -f openapi -c rules.tsv \
+            -r zap-api.html -J zap-api.json -I
+
+      - name: Rapports ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-reports
+          path: zap-reports
+          if-no-files-found: ignore
+
+      - name: Logs des serveurs (en cas d'échec)
+        if: failure()
+        run: |
+          echo "── backend ──"; cat backend.log || true
+          echo "── frontend ──"; cat frontend.log || true

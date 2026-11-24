@@ -1,0 +1,19 @@
+title = "Règles gitleaks du projet Corpo Padel"
+
+# On garde toutes les règles par défaut de gitleaks (clés AWS, tokens GitHub, etc.).
+[extend]
+useDefault = true
+
+# Règle ajoutée : une clé secrète d'application écrite en dur (SP63).
+# Les règles par défaut ne la détectent pas, car sa valeur a peu d'entropie.
+[[rules]]
+id = "cle-secrete-en-dur"
+description = "Clé secrète écrite en dur dans le code ou la configuration"
+regex = '''(?i)secret_key\s*(?::\s*str)?\s*=\s*["']?([A-Za-z0-9_\-]{12,})["']?'''
+secretGroup = 1
+keywords = ["secret_key"]
+
+# Les fichiers d'exemple contiennent volontairement une valeur à remplacer.
+[allowlist]
+description = "Fichiers d'exemple"
+paths = ['''\.env\.example$''']
