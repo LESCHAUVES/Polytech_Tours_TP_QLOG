@@ -100,7 +100,9 @@ jobs:
         run: nohup npm run dev -- --host 127.0.0.1 > ../frontend.log 2>&1 &
 
       - name: Attendre que backend et frontend répondent
-        run: npx --yes wait-on --timeout 60000 http://127.0.0.1:5173 http://127.0.0.1:8000/api/v1/health
+        # http-get:// : wait-on envoie des HEAD par défaut, or /health
+        # n'accepte que GET (HEAD → 405) et ne serait jamais considéré prêt.
+        run: npx --yes wait-on --timeout 60000 http-get://127.0.0.1:5173 http-get://127.0.0.1:8000/api/v1/health
 
       - name: Tests Cypress (headless)
         working-directory: frontend
